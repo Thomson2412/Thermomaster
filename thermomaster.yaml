@@ -151,15 +151,15 @@ climate:
     off_mode:
       - switch.turn_off: boiler_relay
 
-    default_preset: Home
+    default_preset: Away
     on_boot_restore_from: memory
     preset:
       - name: Home
-        default_target_temperature_low: 20 °C
+        default_target_temperature_low: 18 °C
       - name: Away
-        default_target_temperature_low: 16 °C
+        default_target_temperature_low: 10 °C
       - name: Sleep
-        default_target_temperature_low: 17 °C
+        default_target_temperature_low: 12 °C
 
     visual:
       min_temperature: 5 °C
