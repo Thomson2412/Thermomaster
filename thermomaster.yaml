@@ -176,6 +176,16 @@ climate:
     off_mode:
       - switch.turn_off: boiler_relay
 
+    # Setting a target temperature by hand (touch screen or Home Assistant)
+    # sets the current preset: back to "no preset"
+    on_control:
+      - lambda: |-
+          if ((x.get_target_temperature().has_value() ||
+               x.get_target_temperature_low().has_value()) &&
+              !x.get_preset().has_value()) {
+            id(thermostat_ctrl).preset.reset();
+          }
+
     default_preset: Away
     on_boot_restore_from: memory
     preset:
