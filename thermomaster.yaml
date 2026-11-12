@@ -127,6 +127,31 @@ switch:
     restore_mode: ALWAYS_OFF
 
 # ---------------------------------------------------------------------------
+# Bottom hardware button (BOOT, GPIO0): wake the display and cycle the preset
+# ---------------------------------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    id: btn_boot
+    internal: true
+    pin:
+      number: GPIO0
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - light.turn_on:
+          id: display_backlight
+          brightness: 100%
+      - lvgl.page.show: main_page
+      # Also resets LVGL's inactivity timer, so the dim/standby timeouts
+      # start counting again from this press
+      - lvgl.resume:
+      - script.execute: cycle_preset
+
+# ---------------------------------------------------------------------------
 # Thermostat
 # ---------------------------------------------------------------------------
 climate:
@@ -208,6 +233,27 @@ script:
           auto call = id(thermostat_ctrl).make_call();
           call.set_target_temperature(t);
           call.perform();
+      - script.execute: show_set_temporarily
+
+  # Home -> Away -> Sleep -> Home ...
+  - id: cycle_preset
+    then:
+      - lambda: |-
+          using namespace esphome::climate;
+          auto cur = id(thermostat_ctrl).preset;
+          ClimatePreset next = CLIMATE_PRESET_HOME;
+          if (cur.has_value()) {
+            switch (cur.value()) {
+              case CLIMATE_PRESET_HOME:  next = CLIMATE_PRESET_AWAY;  break;
+              case CLIMATE_PRESET_AWAY:  next = CLIMATE_PRESET_SLEEP; break;
+              case CLIMATE_PRESET_SLEEP: next = CLIMATE_PRESET_HOME;  break;
+              default:                   next = CLIMATE_PRESET_HOME;  break;
+            }
+          }
+          auto call = id(thermostat_ctrl).make_call();
+          call.set_preset(next);
+          call.perform();
+      # Show the new preset's target temperature for 2 s
       - script.execute: show_set_temporarily
 
   - id: show_set_temporarily
