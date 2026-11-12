@@ -179,6 +179,15 @@ font:
     bpp: 4
     glyphs: "0123456789.-"
 
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 500
+    id: font_preset
+    size: 28
+    bpp: 4
+    glyphs: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "
+
 # ---------------------------------------------------------------------------
 # UI logic
 # ---------------------------------------------------------------------------
@@ -256,6 +265,22 @@ script:
             char buf[16];
             snprintf(buf, sizeof(buf), "%.1f", v);
             return std::string(buf);
+
+      # Preset label at the bottom gap of the ring
+      - lvgl.label.update:
+          id: lbl_preset
+          text: !lambda |-
+            auto preset = id(thermostat_ctrl).preset;
+            if (!preset.has_value()) return std::string("");
+            switch (preset.value()) {
+              case esphome::climate::CLIMATE_PRESET_HOME: return std::string("HOME");
+              case esphome::climate::CLIMATE_PRESET_AWAY: return std::string("AWAY");
+              case esphome::climate::CLIMATE_PRESET_SLEEP: return std::string("SLEEP");
+              case esphome::climate::CLIMATE_PRESET_COMFORT: return std::string("COMFORT");
+              case esphome::climate::CLIMATE_PRESET_ECO: return std::string("ECO");
+              case esphome::climate::CLIMATE_PRESET_BOOST: return std::string("BOOST");
+              default: return std::string("NONE");
+            }
 
       # Standby label: always shows current room temp + subtle pixel shift for burn-in protection
       - lvgl.label.update:
@@ -431,6 +456,15 @@ lvgl:
             y: 0
             text_font: font_big
             text_color: 0xFFFFFF
+
+        # Preset name positioned in the 90-degree bottom opening of the ring
+        - label:
+            id: lbl_preset
+            text: "HOME"
+            align: BOTTOM_MID
+            y: -34
+            text_font: font_preset
+            text_color: 0xCCCCCC
 
         # Invisible touch zones (Top half)
         - obj:
