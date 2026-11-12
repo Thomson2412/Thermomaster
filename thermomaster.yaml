@@ -181,10 +181,13 @@ climate:
     preset:
       - name: Home
         default_target_temperature_low: 18 °C
+        mode: heat
       - name: Away
         default_target_temperature_low: 10 °C
+        mode: heat
       - name: Sleep
         default_target_temperature_low: 12 °C
+        mode: heat
 
     visual:
       min_temperature: 5 °C
@@ -212,6 +215,16 @@ font:
     size: 28
     bpp: 4
     glyphs: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz "
+
+  # Bold, slightly larger font for the OFF label
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: 900
+    id: font_off
+    size: 34
+    bpp: 4
+    glyphs: "OF "
 
 # ---------------------------------------------------------------------------
 # UI logic
@@ -328,6 +341,17 @@ script:
               default: return std::string("NONE");
             }
 
+      # Mode OFF takes priority over the preset: show a bold "OFF" instead
+      - if:
+          condition:
+            lambda: 'return id(thermostat_ctrl).mode == esphome::climate::CLIMATE_MODE_OFF;'
+          then:
+            - lvgl.widget.hide: lbl_preset
+            - lvgl.widget.show: lbl_off
+          else:
+            - lvgl.widget.show: lbl_preset
+            - lvgl.widget.hide: lbl_off
+
       # Standby label: always shows current room temp + subtle pixel shift for burn-in protection
       - lvgl.label.update:
           id: lbl_standby
@@ -354,11 +378,11 @@ script:
           then:
             - lvgl.widget.update:
                 id: bg_panel
-                bg_color: 0x8B1A1A
+                bg_color: 0xED4B82
           else:
             - lvgl.widget.update:
                 id: bg_panel
-                bg_color: 0x4B2A85
+                bg_color: 0xAF52BF
 
 interval:
   - interval: 1s
@@ -397,7 +421,7 @@ lvgl:
             height: 466
             radius: 0
             border_width: 0
-            bg_color: 0x4B2A85
+            bg_color: 0xAF52BF
             bg_opa: COVER
             scrollable: false
 
@@ -511,6 +535,16 @@ lvgl:
             y: -34
             text_font: font_preset
             text_color: 0xCCCCCC
+
+        # Shown instead of the preset label while the mode is OFF
+        - label:
+            id: lbl_off
+            text: "OFF"
+            hidden: true
+            align: BOTTOM_MID
+            y: -34
+            text_font: font_off
+            text_color: 0xFF9800
 
         # Invisible touch zones (Top half)
         - obj:
