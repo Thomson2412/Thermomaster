@@ -1,7 +1,22 @@
 substitutions:
   name: "thermomaster"
   friendly_name: "Thermomaster"
-  relay_pin: GPIO18
+
+  # OpenTherm adapter. Pin names are from the ESP's point of view:
+  # ot_in_pin  <- adapter's "OUT" pin
+  # ot_out_pin -> adapter's "IN" pin
+  ot_in_pin: GPIO16
+  ot_out_pin: GPIO17
+
+  # DS18B20 room temperature sensor (needs a 4.7k pull-up to 3V3)
+  temp_pin: GPIO18
+
+  # Boiler flow temperature (degC) while heating:
+  #   flow = flow_min + flow_gain * (target - room), clamped to flow_min..flow_max
+  # Starting values, tune to your house. The boiler's own maximum still applies.
+  flow_min: 35
+  flow_max: 55
+  flow_gain: 10
 
 esphome:
   name: "${name}"
@@ -45,12 +60,6 @@ i2c:
   - id: bus_a
     sda: GPIO15
     scl: GPIO14
-    scan: true
-
-  # External header bus for temperature/humidity sensor
-  - id: bus_b
-    sda: GPIO16
-    scl: GPIO17
     scan: true
 
 spi:
@@ -102,29 +111,54 @@ touchscreen:
       mirror_y: true
 
 # ---------------------------------------------------------------------------
-# Temperature sensor on external header bus_b (GPIO16 / GPIO17)
+# OpenTherm: the ESP is the OpenTherm master and replaces the Remeha iSense.
+# ch_enable is controlled by the thermostat below (switch). dhw_enable stays
+# true so hot water keeps working like before.
 # ---------------------------------------------------------------------------
-sensor:
-  - platform: sht3xd
-    i2c_id: bus_b
-    address: 0x44
-    update_interval: 30s
-    temperature:
-      name: "Room Temperature"
-      id: room_temp
-    humidity:
-      name: "Room Humidity"
+opentherm:
+  in_pin: ${ot_in_pin}
+  out_pin: ${ot_out_pin}
+  ch_enable: true
+  dhw_enable: true
+
+# Boiler flow temperature setpoint (level 0..1 maps to flow_min..flow_max)
+output:
+  - platform: opentherm
+    t_set:
+      id: boiler_setpoint
+      min_value: ${flow_min}
+      max_value: ${flow_max}
 
 # ---------------------------------------------------------------------------
-# Relay: dry contact across the boiler's thermostat terminals (GPIO18)
+# Room temperature (DS18B20 on one wire) and boiler diagnostics
+# ---------------------------------------------------------------------------
+one_wire:
+  - platform: gpio
+    pin: ${temp_pin}
+
+sensor:
+  - platform: dallas_temp
+    id: room_temp
+    name: "Room Temperature"
+    update_interval: 30s
+
+  # Not every boiler reports every value
+  - platform: opentherm
+    rel_mod_level:
+      name: "Boiler Modulation"
+    t_boiler:
+      name: "Boiler Flow Temperature"
+
+# ---------------------------------------------------------------------------
+# Central heating enable, driven only by the thermostat below.
 # Always OFF on boot, so a reboot never leaves the boiler calling for heat.
 # ---------------------------------------------------------------------------
 switch:
-  - platform: gpio
-    id: boiler_relay
-    name: "Boiler Relay"
-    pin: ${relay_pin}
-    restore_mode: ALWAYS_OFF
+  - platform: opentherm
+    ch_enable:
+      id: ot_ch_enable
+      internal: true
+      restore_mode: ALWAYS_OFF
 
 # ---------------------------------------------------------------------------
 # Bottom hardware button (BOOT, GPIO0): wake the display and cycle the preset
@@ -151,6 +185,15 @@ binary_sensor:
       - lvgl.resume:
       - script.execute: cycle_preset
 
+  # Boiler status (not every boiler reports every value)
+  - platform: opentherm
+    flame_on:
+      name: "Boiler Flame"
+    ch_active:
+      name: "Boiler Heating Active"
+    fault_indication:
+      name: "Boiler Fault"
+
 # ---------------------------------------------------------------------------
 # Thermostat
 # ---------------------------------------------------------------------------
@@ -170,14 +213,16 @@ climate:
     heat_overrun: 0.3
 
     heat_action:
-      - switch.turn_on: boiler_relay
+      - switch.turn_on: ot_ch_enable
+      - script.execute: update_flow_setpoint
     idle_action:
-      - switch.turn_off: boiler_relay
+      - switch.turn_off: ot_ch_enable
     off_mode:
-      - switch.turn_off: boiler_relay
+      - switch.turn_off: ot_ch_enable
 
     # Setting a target temperature by hand (touch screen or Home Assistant)
-    # sets the current preset: back to "no preset"
+    # leaves the current preset: back to "no preset". Calls that select a
+    # preset (BOOT button, HA preset dropdown) are left alone.
     on_control:
       - lambda: |-
           if ((x.get_target_temperature().has_value() ||
@@ -257,6 +302,17 @@ script:
           call.set_target_temperature(t);
           call.perform();
       - script.execute: show_set_temporarily
+
+  # Flow temperature follows how far the room is below the target
+  - id: update_flow_setpoint
+    then:
+      - lambda: |-
+          float target = id(thermostat_ctrl).target_temperature;
+          float cur = id(room_temp).state;
+          if (std::isnan(target) || std::isnan(cur)) return;
+          float flow = ${flow_min} + ${flow_gain} * (target - cur);
+          flow = std::max((float) ${flow_min}, std::min((float) ${flow_max}, flow));
+          id(boiler_setpoint).set_level((flow - ${flow_min}) / (float) (${flow_max} - ${flow_min}));
 
   # Home -> Away -> Sleep -> Home ...
   - id: cycle_preset
@@ -384,7 +440,7 @@ script:
       # Background: red while heating, purple while idle
       - if:
           condition:
-            switch.is_on: boiler_relay
+            lambda: 'return id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING;'
           then:
             - lvgl.widget.update:
                 id: bg_panel
@@ -398,6 +454,15 @@ interval:
   - interval: 1s
     then:
       - script.execute: update_ui
+
+  # While heating, refresh the boiler flow setpoint
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING;'
+          then:
+            - script.execute: update_flow_setpoint
 
 # ---------------------------------------------------------------------------
 # On-device UI
