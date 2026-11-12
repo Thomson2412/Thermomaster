@@ -84,15 +84,16 @@ output:
             id(disp1).set_brightness(state * 255);
 
 light:
-  - platform: monochromatic
+  - platform: mipi_spi
     id: display_backlight
-    name: "Backlight"
-    output: backlight_brightness
-    default_transition_length:
-      milliseconds: 800
+    display_id: disp1
+    name: "Display Brightness"
+    min_brightness: 15
+    max_brightness: 255
+    default_transition_length: 800ms
     initial_state:
+      state: on
       brightness: 100%
-    restore_mode: ALWAYS_ON
 
 touchscreen:
   - platform: cst9217
@@ -116,8 +117,6 @@ sensor:
     temperature:
       name: "Room Temperature"
       id: room_temp
-      # filters:
-      #   - offset: -0.5
     humidity:
       name: "Room Humidity"
 
@@ -271,6 +270,25 @@ script:
             snprintf(buf, sizeof(buf), "%.1f", v);
             return std::string(buf);
 
+      # Standby label: always shows current room temp + subtle pixel shift for burn-in protection
+      - lvgl.label.update:
+          id: lbl_standby
+          text: !lambda |-
+            float cur = id(room_temp).state;
+            if (std::isnan(cur)) return std::string("--.-");
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.1f", cur);
+            return std::string(buf);
+          x: !lambda |-
+            // Slowly orbits +/- 12 px over time to prevent static pixel wear
+            int step = (millis() / 60000) % 4;
+            const int offsets[4] = {-12, 0, 12, 0};
+            return offsets[step];
+          y: !lambda |-
+            int step = (millis() / 60000) % 4;
+            const int offsets[4] = {0, -12, 0, 12};
+            return offsets[step];
+
       # Background: red while heating, purple while idle
       - if:
           condition:
@@ -291,11 +309,6 @@ interval:
 
 # ---------------------------------------------------------------------------
 # On-device UI
-#   - big current temperature in the middle
-#   - 270 degree ring: green = set temperature, red = still to heat,
-#     blue = above target
-#   - tap the top half to raise the target, the bottom half to lower it
-#     (hold to repeat)
 # ---------------------------------------------------------------------------
 lvgl:
   displays:
@@ -308,10 +321,13 @@ lvgl:
       then:
         - light.turn_on:
             id: display_backlight
-            brightness: 60%
-    - timeout: 5min
+            brightness: 40%
+    - timeout: 1min
       then:
-        - light.turn_off: display_backlight
+        - light.turn_on:
+            id: display_backlight
+            brightness: 10%
+        - lvgl.page.show: oled_standby_page
   pages:
     - id: main_page
       widgets:
@@ -327,8 +343,7 @@ lvgl:
             bg_opa: COVER
             scrollable: false
 
-        # Dark track behind the ring (keeps the coloured parts readable on
-        # both the purple and the red background)
+        # Dark track behind the ring
         - arc:
             id: arc_track
             align: CENTER
@@ -398,7 +413,7 @@ lvgl:
             knob:
               bg_opa: TRANSP
 
-        # Green: the part where set and current agree (drawn on top)
+        # Green: the part where set and current agree
         - arc:
             id: arc_green
             align: CENTER
@@ -421,8 +436,7 @@ lvgl:
             knob:
               bg_opa: TRANSP
 
-        # The only text: current temperature (set temperature for 2 s
-        # after a tap)
+        # Big number: current temperature
         - label:
             id: lbl_current
             text: "--.-"
@@ -431,7 +445,7 @@ lvgl:
             text_font: font_big
             text_color: 0xFFFFFF
 
-        # Invisible touch zones (kept last so they sit on top)
+        # Invisible touch zones (Top half)
         - obj:
             align: TOP_MID
             width: 466
@@ -444,13 +458,20 @@ lvgl:
               - light.turn_on: 
                   id: display_backlight
                   brightness: 100%  
+              - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: 0.5
             on_long_press_repeat:
+              - light.turn_on: 
+                  id: display_backlight
+                  brightness: 100%  
+              - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: 0.5
+
+        # Invisible touch zones (Bottom half)
         - obj:
             align: BOTTOM_MID
             width: 466
@@ -463,10 +484,52 @@ lvgl:
               - light.turn_on: 
                   id: display_backlight
                   brightness: 100%  
+              - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: -0.5
             on_long_press_repeat:
+              - light.turn_on: 
+                  id: display_backlight
+                  brightness: 100%  
+              - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: -0.5
+
+    # Minimal OLED Power-Saving Standby Page (Pure black background, dim live temperature)
+    - id: oled_standby_page
+      widgets:
+        - obj:
+            align: CENTER
+            width: 466
+            height: 466
+            radius: 0
+            border_width: 0
+            bg_color: 0x000000
+            bg_opa: COVER
+            scrollable: false
+
+        - label:
+            id: lbl_standby
+            text: "--.-"
+            align: CENTER
+            x: 0
+            y: 0
+            text_font: font_big
+            text_color: 0x444444
+
+        # Full-screen touch catcher to instantly wake up the display anywhere
+        - obj:
+            align: CENTER
+            width: 466
+            height: 466
+            radius: 0
+            border_width: 0
+            bg_opa: TRANSP
+            scrollable: false
+            on_short_click:
+              - light.turn_on:
+                  id: display_backlight
+                  brightness: 100%
+              - lvgl.page.show: main_page
