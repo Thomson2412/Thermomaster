@@ -1,7 +1,7 @@
 substitutions:
   name: "thermomaster"
   friendly_name: "Thermomaster"
-  relay_pin: GPIO16
+  relay_pin: GPIO18
 
 esphome:
   name: "${name}"
@@ -41,9 +41,16 @@ external_components:
 # Buses
 # ---------------------------------------------------------------------------
 i2c:
+  # Internal bus (CST9217 touch, AXP2101 PMIC, QMI8658 IMU)
   - id: bus_a
     sda: GPIO15
     scl: GPIO14
+    scan: true
+
+  # External header bus for temperature/humidity sensor
+  - id: bus_b
+    sda: GPIO16
+    scl: GPIO17
     scan: true
 
 spi:
@@ -57,7 +64,7 @@ spi:
       - GPIO7
 
 # ---------------------------------------------------------------------------
-# Display, backlight and touch (from the ESPHome devices page for this board)
+# Display, backlight and touch
 # ---------------------------------------------------------------------------
 display:
   - platform: mipi_spi
@@ -69,19 +76,7 @@ display:
     dimensions:
       height: 466
       width: 466
-      # The CO5300 panel on this board starts 6 columns into the controller's
-      # memory (Waveshare's own driver uses a 6 px column offset). Without it
-      # the picture is shifted and a stray strip shows at the right edge.
       offset_width: 6
-
-output:
-  - platform: template
-    id: backlight_brightness
-    type: float
-    write_action:
-      then:
-        - lambda: |-
-            id(disp1).set_brightness(state * 255);
 
 light:
   - platform: mipi_spi
@@ -97,6 +92,7 @@ light:
 
 touchscreen:
   - platform: cst9217
+    i2c_id: bus_a
     display: disp1
     id: ts_disp1
     interrupt_pin: GPIO11
@@ -106,12 +102,11 @@ touchscreen:
       mirror_y: true
 
 # ---------------------------------------------------------------------------
-# Temperature sensor: SHT31 on the shared I2C bus (put it on a short cable,
-# away from the board: the AMOLED and ESP32 warm up and skew the reading)
+# Temperature sensor on external header bus_b (GPIO16 / GPIO17)
 # ---------------------------------------------------------------------------
 sensor:
   - platform: sht3xd
-    i2c_id: bus_a
+    i2c_id: bus_b
     address: 0x44
     update_interval: 30s
     temperature:
@@ -121,7 +116,7 @@ sensor:
       name: "Room Humidity"
 
 # ---------------------------------------------------------------------------
-# Relay: dry contact across the boiler's thermostat terminals.
+# Relay: dry contact across the boiler's thermostat terminals (GPIO18)
 # Always OFF on boot, so a reboot never leaves the boiler calling for heat.
 # ---------------------------------------------------------------------------
 switch:
@@ -153,7 +148,6 @@ climate:
       - switch.turn_on: boiler_relay
     idle_action:
       - switch.turn_off: boiler_relay
-    # "off" mode: make sure the relay is open
     off_mode:
       - switch.turn_off: boiler_relay
 
@@ -173,8 +167,7 @@ climate:
       temperature_step: 0.5 °C
 
 # ---------------------------------------------------------------------------
-# Fonts: the built-in LVGL fonts stop at 48 px, so the big temperature uses
-# a Google Font that is downloaded at compile time (digits only).
+# Fonts
 # ---------------------------------------------------------------------------
 font:
   - file:
@@ -188,16 +181,13 @@ font:
 
 # ---------------------------------------------------------------------------
 # UI logic
-#   Ring scale: 5.0 - 30.0 °C, handled in tenths of a degree (50 - 300)
 # ---------------------------------------------------------------------------
 globals:
-  # true while the big number shows the set temperature
   - id: show_set
     type: bool
     initial_value: 'false'
 
 script:
-  # Change the target temperature by `delta` degrees (clamped to 5 - 30)
   - id: adjust_target
     parameters:
       delta: float
@@ -211,8 +201,6 @@ script:
           call.perform();
       - script.execute: show_set_temporarily
 
-  # Show the set temperature for 2 s after a change, then go back to the
-  # current temperature. Every new tap restarts the 2 s.
   - id: show_set_temporarily
     mode: restart
     then:
@@ -226,7 +214,6 @@ script:
           value: 'false'
       - script.execute: update_ui
 
-  # Redraw ring, labels and background colour
   - id: update_ui
     then:
       # Green: from the start up to whichever is lower (set or current)
@@ -455,17 +442,17 @@ lvgl:
             bg_opa: TRANSP
             scrollable: false
             on_short_click:
-              - light.turn_on: 
+              - light.turn_on:
                   id: display_backlight
-                  brightness: 100%  
+                  brightness: 100%
               - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: 0.5
             on_long_press_repeat:
-              - light.turn_on: 
+              - light.turn_on:
                   id: display_backlight
-                  brightness: 100%  
+                  brightness: 100%
               - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
@@ -481,23 +468,23 @@ lvgl:
             bg_opa: TRANSP
             scrollable: false
             on_short_click:
-              - light.turn_on: 
+              - light.turn_on:
                   id: display_backlight
-                  brightness: 100%  
+                  brightness: 100%
               - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: -0.5
             on_long_press_repeat:
-              - light.turn_on: 
+              - light.turn_on:
                   id: display_backlight
-                  brightness: 100%  
+                  brightness: 100%
               - lvgl.page.show: main_page
               - script.execute:
                   id: adjust_target
                   delta: -0.5
 
-    # Minimal OLED Power-Saving Standby Page (Pure black background, dim live temperature)
+    # Minimal OLED Power-Saving Standby Page
     - id: oled_standby_page
       widgets:
         - obj:
