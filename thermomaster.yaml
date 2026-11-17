@@ -5,11 +5,13 @@ substitutions:
   # OpenTherm adapter. Pin names are from the ESP's point of view:
   # ot_in_pin  <- adapter's "OUT" pin
   # ot_out_pin -> adapter's "IN" pin
-  ot_in_pin: GPIO16
-  ot_out_pin: GPIO17
+  ot_in_pin: GPIO17
+  ot_out_pin: GPIO18
 
-  # DS18B20 room temperature sensor (needs a 4.7k pull-up to 3V3)
-  temp_pin: GPIO18
+  ntc_pin: GPIO16
+  ntc_divider: 5kOhm
+  ntc_r25: 10kOhm
+  ntc_b: 3950
 
   # Boiler flow temperature (degC) while heating:
   #   flow = flow_min + flow_gain * (target - room), clamped to flow_min..flow_max
@@ -130,17 +132,49 @@ output:
       max_value: ${flow_max}
 
 # ---------------------------------------------------------------------------
-# Room temperature (DS18B20 on one wire) and boiler diagnostics
+# Room temperature (NTC on an ADC pin) and boiler diagnostics
 # ---------------------------------------------------------------------------
-one_wire:
-  - platform: gpio
-    pin: ${temp_pin}
-
 sensor:
-  - platform: dallas_temp
+  # 1) voltage on the divider
+  - platform: adc
+    id: ntc_adc
+    name: "NTC Voltage"
+    internal: true
+    pin: ${ntc_pin}
+    attenuation: 12db
+    samples: 16
+    update_interval: 10s
+
+  # 2) NTC resistance. DOWNSTREAM = the NTC is on the GND side of the divider
+  - platform: resistance
+    id: ntc_resistance
+    name: "NTC Resistance"
+    internal: true
+    sensor: ntc_adc
+    configuration: UPSTREAM
+    resistor: ${ntc_divider}
+    reference_voltage: 3.3V
+
+  # 3) temperature
+  - platform: ntc
     id: room_temp
     name: "Room Temperature"
-    update_interval: 30s
+    sensor: ntc_resistance
+    calibration:
+      b_constant: ${ntc_b}
+      reference_temperature: 25°C
+      reference_resistance: ${ntc_r25}
+    filters:
+      # A broken or shorted sensor wire gives an absurd value. Report NaN
+      # instead, so it can never look like "very cold room".
+      - lambda: |-
+          if (x < -10.0f || x > 50.0f) return NAN;
+          return x;
+      - sliding_window_moving_average:
+          window_size: 6
+          send_every: 1
+      # Calibrate against a reference thermometer if needed:
+      # - offset: -0.5
 
   # Not every boiler reports every value
   - platform: opentherm
@@ -454,6 +488,18 @@ interval:
   - interval: 1s
     then:
       - script.execute: update_ui
+
+  # Safety: central heating is only enabled while the thermostat is heating
+  # AND the room temperature reading is valid. A dead sensor switches it off.
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING && !std::isnan(id(room_temp).state);'
+          then:
+            - switch.turn_on: ot_ch_enable
+          else:
+            - switch.turn_off: ot_ch_enable
 
   # While heating, refresh the boiler flow setpoint
   - interval: 30s
