@@ -1,0 +1,160 @@
+substitutions:
+  name: "thermogatewayer"
+  friendly_name: "Thermogatewayer"
+
+  # OpenTherm adapter. Pin names are from the ESP's point of view:
+  # ot_in_pin  <- adapter's "OUT" pin
+  # ot_out_pin -> adapter's "IN" pin
+  # GPIO21/22 are the D2/D1 positions on a D1 mini32, which is where the
+  # common D1-mini OpenTherm shields put IN/OUT. Check against your shield.
+  ot_in_pin: GPIO21
+  ot_out_pin: GPIO22
+
+  # Node name of the display/thermostat that sends heat demand + flow setpoint
+  thermostat_node: "thermomaster"
+
+  # No packet from the thermostat for this long: central heating off
+  link_timeout_ms: "300000"
+
+# flow_min/flow_max (shared with the display)
+packages:
+  heating: !include common/heating.yaml
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+
+esp32:
+  board: wemos_d1_mini32
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    encryption:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  # Flow temperature requested by the thermostat (degC)
+  - platform: packet_transport
+    provider: ${thermostat_node}
+    remote_id: flow_setpoint
+    id: remote_flow
+    name: "Requested Flow Temperature"
+    internal: false
+    on_value:
+      - lambda: 'id(last_rx) = millis();'
+      - script.execute: apply_demand
+
+  # Not every boiler reports every value
+  - platform: opentherm
+    rel_mod_level:
+      name: "Boiler Modulation"
+    t_boiler:
+      name: "Boiler Flow Temperature"
+
+# ---------------------------------------------------------------------------
+# Link to the thermostat: UDP broadcast over Wi-Fi, encrypted. Both devices
+# must be on the same subnet.
+# ---------------------------------------------------------------------------
+udp:
+
+packet_transport:
+  - platform: udp
+    providers:
+      - name: ${thermostat_node}
+        encryption: !secret transport_key
+
+# ---------------------------------------------------------------------------
+# OpenTherm: this ESP is the OpenTherm master and replaces the Remeha iSense.
+# dhw_enable stays true so hot water keeps working like before.
+# ---------------------------------------------------------------------------
+opentherm:
+  in_pin: ${ot_in_pin}
+  out_pin: ${ot_out_pin}
+  ch_enable: true
+  dhw_enable: true
+
+# Boiler flow temperature setpoint (level 0..1 maps to flow_min..flow_max)
+output:
+  - platform: opentherm
+    t_set:
+      id: boiler_setpoint
+      min_value: ${flow_min}
+      max_value: ${flow_max}
+
+# Central heating enable, driven only by apply_demand.
+# Always OFF on boot, so a reboot never leaves the boiler calling for heat.
+switch:
+  - platform: opentherm
+    ch_enable:
+      id: ot_ch_enable
+      internal: true
+      restore_mode: ALWAYS_OFF
+
+binary_sensor:
+  # Heat demand from the thermostat
+  - platform: packet_transport
+    provider: ${thermostat_node}
+    remote_id: heat_demand
+    id: remote_demand
+    name: "Heat Demand"
+    internal: false
+    on_state:
+      - script.execute: apply_demand
+
+  - platform: template
+    id: link_ok
+    name: "Thermostat Link"
+    device_class: connectivity
+    lambda: |-
+      return id(last_rx) != 0 && (millis() - id(last_rx)) < ${link_timeout_ms};
+
+  # Boiler status (not every boiler reports every value)
+  - platform: opentherm
+    flame_on:
+      name: "Boiler Flame"
+    ch_active:
+      name: "Boiler Heating Active"
+    fault_indication:
+      name: "Boiler Fault"
+
+globals:
+  # millis() of the last packet from the thermostat, 0 = never
+  - id: last_rx
+    type: uint32_t
+    initial_value: '0'
+
+script:
+  # Heat only while the thermostat asks for it AND its packets are recent.
+  # A lost link or a missing setpoint switches central heating off.
+  - id: apply_demand
+    then:
+      - lambda: |-
+          bool fresh = id(last_rx) != 0 && (millis() - id(last_rx)) < ${link_timeout_ms};
+          float flow = id(remote_flow).state;
+          if (fresh && id(remote_demand).state && !std::isnan(flow)) {
+            flow = std::max((float) ${flow_min}, std::min((float) ${flow_max}, flow));
+            id(boiler_setpoint).set_level((flow - ${flow_min}) / (float) (${flow_max} - ${flow_min}));
+            id(ot_ch_enable).turn_on();
+          } else {
+            id(ot_ch_enable).turn_off();
+          }
+
+interval:
+  - interval: 10s
+    then:
+      - script.execute: apply_demand

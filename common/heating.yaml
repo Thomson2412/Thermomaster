@@ -1,0 +1,6 @@
+substitutions:
+  # Boiler flow temperature range (degC). The display requests a flow
+  # temperature in this range; the gateway maps it onto the OpenTherm setpoint.
+  # Starting values, tune to your house. The boiler's own maximum still applies.
+  flow_min: 35
+  flow_max: 55

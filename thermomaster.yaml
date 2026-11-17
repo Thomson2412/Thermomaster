@@ -2,12 +2,6 @@ substitutions:
   name: "thermomaster"
   friendly_name: "Thermomaster"
 
-  # OpenTherm adapter. Pin names are from the ESP's point of view:
-  # ot_in_pin  <- adapter's "OUT" pin
-  # ot_out_pin -> adapter's "IN" pin
-  ot_in_pin: GPIO17
-  ot_out_pin: GPIO18
-
   ntc_pin: GPIO16
   ntc_divider: 5kOhm
   ntc_r25: 10kOhm
@@ -15,10 +9,11 @@ substitutions:
 
   # Boiler flow temperature (degC) while heating:
   #   flow = flow_min + flow_gain * (target - room), clamped to flow_min..flow_max
-  # Starting values, tune to your house. The boiler's own maximum still applies.
-  flow_min: 35
-  flow_max: 55
+  # flow_min/flow_max live in common/heating.yaml (shared with the gateway).
   flow_gain: 10
+
+packages:
+  heating: !include common/heating.yaml
 
 esphome:
   name: "${name}"
@@ -113,26 +108,24 @@ touchscreen:
       mirror_y: true
 
 # ---------------------------------------------------------------------------
-# OpenTherm: the ESP is the OpenTherm master and replaces the Remeha iSense.
-# ch_enable is controlled by the thermostat below (switch). dhw_enable stays
-# true so hot water keeps working like before.
+# Link to the boiler gateway (thermogatewayer): UDP broadcast over Wi-Fi,
+# encrypted. Sends heat demand + flow setpoint; the gateway drives OpenTherm
+# and switches heating off if these packets stop arriving.
 # ---------------------------------------------------------------------------
-opentherm:
-  in_pin: ${ot_in_pin}
-  out_pin: ${ot_out_pin}
-  ch_enable: true
-  dhw_enable: true
+udp:
 
-# Boiler flow temperature setpoint (level 0..1 maps to flow_min..flow_max)
-output:
-  - platform: opentherm
-    t_set:
-      id: boiler_setpoint
-      min_value: ${flow_min}
-      max_value: ${flow_max}
+packet_transport:
+  - platform: udp
+    update_interval: 10s
+    encryption: !secret transport_key
+    rolling_code_enable: true
+    sensors:
+      - flow_setpoint
+    binary_sensors:
+      - heat_demand
 
 # ---------------------------------------------------------------------------
-# Room temperature (NTC on an ADC pin) and boiler diagnostics
+# Room temperature (NTC on an ADC pin)
 # ---------------------------------------------------------------------------
 sensor:
   # 1) voltage on the divider
@@ -176,23 +169,25 @@ sensor:
       # Calibrate against a reference thermometer if needed:
       # - offset: -0.5
 
-  # Not every boiler reports every value
-  - platform: opentherm
-    rel_mod_level:
-      name: "Boiler Modulation"
-    t_boiler:
-      name: "Boiler Flow Temperature"
+  # Boiler flow temperature to request (degC), sent to the gateway:
+  #   flow = flow_min + flow_gain * (target - room), clamped to flow_min..flow_max
+  - platform: template
+    id: flow_setpoint
+    name: "Flow Setpoint"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      float target = id(thermostat_ctrl).target_temperature;
+      float cur = id(room_temp).state;
+      if (std::isnan(target) || std::isnan(cur)) return NAN;
+      float flow = ${flow_min} + ${flow_gain} * (target - cur);
+      return std::max((float) ${flow_min}, std::min((float) ${flow_max}, flow));
 
-# ---------------------------------------------------------------------------
-# Central heating enable, driven only by the thermostat below.
-# Always OFF on boot, so a reboot never leaves the boiler calling for heat.
-# ---------------------------------------------------------------------------
-switch:
-  - platform: opentherm
-    ch_enable:
-      id: ot_ch_enable
-      internal: true
-      restore_mode: ALWAYS_OFF
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
 
 # ---------------------------------------------------------------------------
 # Bottom hardware button (BOOT, GPIO0): wake the display and cycle the preset
@@ -219,14 +214,14 @@ binary_sensor:
       - lvgl.resume:
       - script.execute: cycle_preset
 
-  # Boiler status (not every boiler reports every value)
-  - platform: opentherm
-    flame_on:
-      name: "Boiler Flame"
-    ch_active:
-      name: "Boiler Heating Active"
-    fault_indication:
-      name: "Boiler Fault"
+  # Heat demand sent to the gateway: only while the thermostat is heating AND
+  # the room temperature reading is valid. A dead sensor means no demand.
+  - platform: template
+    id: heat_demand
+    name: "Heat Demand"
+    lambda: |-
+      return id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING &&
+             !std::isnan(id(room_temp).state);
 
 # ---------------------------------------------------------------------------
 # Thermostat
@@ -246,13 +241,13 @@ climate:
     heat_deadband: 0.3
     heat_overrun: 0.3
 
+    # heat_demand follows the action; refresh the setpoint right away
     heat_action:
-      - switch.turn_on: ot_ch_enable
-      - script.execute: update_flow_setpoint
+      - component.update: flow_setpoint
     idle_action:
-      - switch.turn_off: ot_ch_enable
+      - component.update: flow_setpoint
     off_mode:
-      - switch.turn_off: ot_ch_enable
+      - component.update: flow_setpoint
 
     # Setting a target temperature by hand (touch screen or Home Assistant)
     # leaves the current preset: back to "no preset". Calls that select a
@@ -336,17 +331,6 @@ script:
           call.set_target_temperature(t);
           call.perform();
       - script.execute: show_set_temporarily
-
-  # Flow temperature follows how far the room is below the target
-  - id: update_flow_setpoint
-    then:
-      - lambda: |-
-          float target = id(thermostat_ctrl).target_temperature;
-          float cur = id(room_temp).state;
-          if (std::isnan(target) || std::isnan(cur)) return;
-          float flow = ${flow_min} + ${flow_gain} * (target - cur);
-          flow = std::max((float) ${flow_min}, std::min((float) ${flow_max}, flow));
-          id(boiler_setpoint).set_level((flow - ${flow_min}) / (float) (${flow_max} - ${flow_min}));
 
   # Home -> Away -> Sleep -> Home ...
   - id: cycle_preset
@@ -488,27 +472,6 @@ interval:
   - interval: 1s
     then:
       - script.execute: update_ui
-
-  # Safety: central heating is only enabled while the thermostat is heating
-  # AND the room temperature reading is valid. A dead sensor switches it off.
-  - interval: 10s
-    then:
-      - if:
-          condition:
-            lambda: 'return id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING && !std::isnan(id(room_temp).state);'
-          then:
-            - switch.turn_on: ot_ch_enable
-          else:
-            - switch.turn_off: ot_ch_enable
-
-  # While heating, refresh the boiler flow setpoint
-  - interval: 30s
-    then:
-      - if:
-          condition:
-            lambda: 'return id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING;'
-          then:
-            - script.execute: update_flow_setpoint
 
 # ---------------------------------------------------------------------------
 # On-device UI
