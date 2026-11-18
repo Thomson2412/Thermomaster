@@ -32,6 +32,8 @@ psram:
 logger:
 
 api:
+  # Keep running when Home Assistant is down (default: reboot after 15 min)
+  reboot_timeout: 0s
   encryption:
     key: !secret api_key
 
@@ -42,6 +44,8 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # Keep running when Wi-Fi is down (default: reboot after 15 min)
+  reboot_timeout: 0s
 
 # Touch controller driver (CST9217) from a community component
 external_components:
