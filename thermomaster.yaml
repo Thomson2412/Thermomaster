@@ -112,14 +112,29 @@ touchscreen:
       mirror_y: true
 
 # ---------------------------------------------------------------------------
-# Link to the boiler gateway (thermogatewayer): UDP broadcast over Wi-Fi,
-# encrypted. Sends heat demand + flow setpoint; the gateway drives OpenTherm
-# and switches heating off if these packets stop arriving.
+# Links to the boiler gateway (thermogatewayer). Heat demand + flow setpoint
+# go out every 10 s over both, encrypted; the gateway uses whichever arrives
+# and switches heating off if both stop. Comment one out to test the other.
+# - UDP broadcast over Wi-Fi (needs the router, both on the same subnet)
+# - ESP-NOW, directly between the ESPs (follows the router's Wi-Fi channel)
 # ---------------------------------------------------------------------------
 udp:
 
+espnow:
+
 packet_transport:
   - platform: udp
+    id: link_udp
+    update_interval: 10s
+    encryption: !secret transport_key
+    rolling_code_enable: true
+    sensors:
+      - flow_setpoint
+    binary_sensors:
+      - heat_demand
+
+  - platform: espnow
+    id: link_espnow
     update_interval: 10s
     encryption: !secret transport_key
     rolling_code_enable: true

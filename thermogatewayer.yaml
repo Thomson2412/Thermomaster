@@ -44,22 +44,63 @@ wifi:
   password: !secret wifi_password
   # Keep running when Wi-Fi is down (default: reboot after 15 min)
   reboot_timeout: 0s
+  # Keep the radio awake. The ESP32 default (light) sleeps between router
+  # beacons and misses most ESP-NOW packets.
+  power_save_mode: none
 
 sensor:
   - platform: wifi_signal
     name: "WiFi Signal"
     update_interval: 60s
 
-  # Flow temperature requested by the thermostat (degC)
+  # Flow temperature requested by the thermostat (degC), once per link.
+  # Every packet carries it, so it doubles as the "packet received" signal.
   - platform: packet_transport
+    transport_id: link_udp
     provider: ${thermostat_node}
     remote_id: flow_setpoint
-    id: remote_flow
-    name: "Requested Flow Temperature"
-    internal: false
+    id: flow_udp
     on_value:
-      - lambda: 'id(last_rx) = millis();'
+      - lambda: |-
+          id(last_rx_udp) = millis();
+          id(rx_count_udp) += 1;
       - script.execute: apply_demand
+
+  - platform: packet_transport
+    transport_id: link_espnow
+    provider: ${thermostat_node}
+    remote_id: flow_setpoint
+    id: flow_espnow
+    on_value:
+      - lambda: |-
+          id(last_rx_espnow) = millis();
+          id(rx_count_espnow) += 1;
+      - script.execute: apply_demand
+
+  # The flow temperature actually in use (from the most recent link)
+  - platform: template
+    id: requested_flow
+    name: "Requested Flow Temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: 'return id(active_flow);'
+
+  # Packets received per link since boot, to compare link stability
+  - platform: template
+    name: "UDP Packets"
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: 'return id(rx_count_udp);'
+
+  - platform: template
+    name: "ESP-NOW Packets"
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: 'return id(rx_count_espnow);'
 
   # Not every boiler reports every value
   - platform: opentherm
@@ -69,13 +110,27 @@ sensor:
       name: "Boiler Flow Temperature"
 
 # ---------------------------------------------------------------------------
-# Link to the thermostat: UDP broadcast over Wi-Fi, encrypted. Both devices
-# must be on the same subnet.
+# Links to the thermostat. It sends every packet over both, encrypted, and
+# whichever arrives is used:
+# - UDP broadcast over Wi-Fi (needs the router, both on the same subnet)
+# - ESP-NOW, directly between the ESPs (follows the router's Wi-Fi channel)
 # ---------------------------------------------------------------------------
 udp:
 
+espnow:
+  # Packets from unknown senders are dropped, so accept the thermostat as a
+  # peer when it first sends. packet_transport still checks the encryption key.
+  auto_add_peer: true
+
 packet_transport:
   - platform: udp
+    id: link_udp
+    providers:
+      - name: ${thermostat_node}
+        encryption: !secret transport_key
+
+  - platform: espnow
+    id: link_espnow
     providers:
       - name: ${thermostat_node}
         encryption: !secret transport_key
@@ -108,22 +163,40 @@ switch:
       restore_mode: ALWAYS_OFF
 
 binary_sensor:
-  # Heat demand from the thermostat
+  # Heat demand from the thermostat, once per link
   - platform: packet_transport
+    transport_id: link_udp
     provider: ${thermostat_node}
     remote_id: heat_demand
-    id: remote_demand
-    name: "Heat Demand"
-    internal: false
+    id: demand_udp
     on_state:
       - script.execute: apply_demand
 
+  - platform: packet_transport
+    transport_id: link_espnow
+    provider: ${thermostat_node}
+    remote_id: heat_demand
+    id: demand_espnow
+    on_state:
+      - script.execute: apply_demand
+
+  # The heat demand actually in use (from the most recent link)
   - platform: template
-    id: link_ok
-    name: "Thermostat Link"
+    name: "Heat Demand"
+    lambda: 'return id(active_demand);'
+
+  # Link status: a packet within the last minute (sent every 10 s)
+  - platform: template
+    name: "UDP Link"
     device_class: connectivity
     lambda: |-
-      return id(last_rx) != 0 && (millis() - id(last_rx)) < ${link_timeout_ms};
+      return id(last_rx_udp) != 0 && (millis() - id(last_rx_udp)) < 60000;
+
+  - platform: template
+    name: "ESP-NOW Link"
+    device_class: connectivity
+    lambda: |-
+      return id(last_rx_espnow) != 0 && (millis() - id(last_rx_espnow)) < 60000;
 
   # Boiler status (not every boiler reports every value)
   - platform: opentherm
@@ -135,26 +208,52 @@ binary_sensor:
       name: "Boiler Fault"
 
 globals:
-  # millis() of the last packet from the thermostat, 0 = never
-  - id: last_rx
+  # millis() of the last packet per link, 0 = never
+  - id: last_rx_udp
     type: uint32_t
     initial_value: '0'
+  - id: last_rx_espnow
+    type: uint32_t
+    initial_value: '0'
+  - id: rx_count_udp
+    type: uint32_t
+    initial_value: '0'
+  - id: rx_count_espnow
+    type: uint32_t
+    initial_value: '0'
+  # What apply_demand last sent to the boiler
+  - id: active_demand
+    type: bool
+    initial_value: 'false'
+  - id: active_flow
+    type: float
+    initial_value: 'NAN'
 
 script:
-  # Heat only while the thermostat asks for it AND its packets are recent.
-  # A lost link or a missing setpoint switches central heating off.
+  # Use the link with the most recent packet. Heat only while the thermostat
+  # asks for it AND that packet is recent. No packet on either link for
+  # link_timeout_ms, or a missing setpoint, switches central heating off.
   - id: apply_demand
     then:
       - lambda: |-
-          bool fresh = id(last_rx) != 0 && (millis() - id(last_rx)) < ${link_timeout_ms};
-          float flow = id(remote_flow).state;
-          if (fresh && id(remote_demand).state && !std::isnan(flow)) {
+          uint32_t now = millis();
+          uint32_t age_udp = id(last_rx_udp) ? now - id(last_rx_udp) : UINT32_MAX;
+          uint32_t age_espnow = id(last_rx_espnow) ? now - id(last_rx_espnow) : UINT32_MAX;
+          bool use_udp = age_udp <= age_espnow;
+          uint32_t age = use_udp ? age_udp : age_espnow;
+          bool demand = use_udp ? id(demand_udp).state : id(demand_espnow).state;
+          float flow = use_udp ? id(flow_udp).state : id(flow_espnow).state;
+
+          if (age < ${link_timeout_ms} && demand && !std::isnan(flow)) {
             flow = std::max((float) ${flow_min}, std::min((float) ${flow_max}, flow));
             id(boiler_setpoint).set_level((flow - ${flow_min}) / (float) (${flow_max} - ${flow_min}));
             id(ot_ch_enable).turn_on();
+            id(active_demand) = true;
           } else {
             id(ot_ch_enable).turn_off();
+            id(active_demand) = false;
           }
+          id(active_flow) = age < ${link_timeout_ms} ? flow : NAN;
 
 interval:
   - interval: 10s
