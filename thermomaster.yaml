@@ -295,7 +295,9 @@ climate:
     visual:
       min_temperature: 5 °C
       max_temperature: 30 °C
-      temperature_step: 0.5 °C
+      temperature_step:
+        target_temperature: 0.5
+        current_temperature: 0.1
 
 # ---------------------------------------------------------------------------
 # Fonts
