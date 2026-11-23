@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "Thermomaster"
 
   ntc_pin: GPIO16
-  ntc_divider: 5kOhm
+  ntc_divider: 4.7kOhm
   ntc_r25: 10kOhm
   ntc_b: 3950
 
@@ -153,8 +153,8 @@ sensor:
     name: "NTC Voltage"
     internal: true
     pin: ${ntc_pin}
-    attenuation: 12db
-    samples: 16
+    attenuation: 6db
+    samples: 64
     update_interval: 10s
 
   # 2) NTC resistance. DOWNSTREAM = the NTC is on the GND side of the divider
@@ -180,10 +180,10 @@ sensor:
       # A broken or shorted sensor wire gives an absurd value. Report NaN
       # instead, so it can never look like "very cold room".
       - lambda: |-
-          if (x < -10.0f || x > 50.0f) return NAN;
+          if (x < -10.0f || x > 40.0f) return NAN;
           return x;
       - sliding_window_moving_average:
-          window_size: 6
+          window_size: 12
           send_every: 1
       # Calibrate against a reference thermometer if needed:
       # - offset: -0.5
