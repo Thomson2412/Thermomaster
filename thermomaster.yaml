@@ -8,9 +8,15 @@ substitutions:
   ntc_b: 3950
 
   # Boiler flow temperature (degC) while heating:
-  #   flow = flow_min + flow_gain * (target - room), clamped to flow_min..flow_max
+  #   flow = flow_min + flow_gain * (target - room) + integral,
+  #   clamped to flow_min..flow_max
   # flow_min/flow_max live in common/heating.yaml (shared with the gateway).
   flow_gain: 10
+  # Integral: degC of flow added per (degC short x second) while heating, so a
+  # room that stays just below target keeps pushing the flow up.
+  # 0.003 = about +11 degC of flow per hour at 1 degC short. Lower it if the
+  # room overshoots, raise it if it still takes long to reach the target.
+  flow_ki: "0.003"
 
 packages:
   heating: !include common/heating.yaml
@@ -189,7 +195,10 @@ sensor:
       # - offset: -0.5
 
   # Boiler flow temperature to request (degC), sent to the gateway:
-  #   flow = flow_min + flow_gain * (target - room), clamped to flow_min..flow_max
+  #   flow = flow_min + flow_gain * (target - room) + integral,
+  #   clamped to flow_min..flow_max
+  # Also runs on heat/idle/off actions, so the time step is measured with
+  # millis() instead of assuming 10 s.
   - platform: template
     id: flow_setpoint
     name: "Flow Setpoint"
@@ -201,8 +210,32 @@ sensor:
       float target = id(thermostat_ctrl).target_temperature;
       float cur = id(room_temp).state;
       if (std::isnan(target) || std::isnan(cur)) return NAN;
-      float flow = ${flow_min} + ${flow_gain} * (target - cur);
+      float err = target - cur;
+
+      uint32_t now = millis();
+      float dt = id(flow_i_ms) == 0 ? 0.0f : (now - id(flow_i_ms)) / 1000.0f;
+      id(flow_i_ms) = now;
+
+      // Integrate only while heating, and not while the request is already
+      // capped at flow_max with the room still short (anti-windup)
+      float raw = ${flow_min} + ${flow_gain} * err + id(flow_i);
+      bool heating = id(thermostat_ctrl).action == esphome::climate::CLIMATE_ACTION_HEATING;
+      if (heating && dt < 60.0f && !(raw >= ${flow_max} && err > 0)) {
+        id(flow_i) += ${flow_ki} * err * dt;
+        id(flow_i) = std::max(0.0f, std::min(20.0f, id(flow_i)));
+      }
+
+      float flow = ${flow_min} + ${flow_gain} * err + id(flow_i);
       return std::max((float) ${flow_min}, std::min((float) ${flow_max}, flow));
+
+  # How much the integral currently adds to the flow (degC), for tuning flow_ki
+  - platform: template
+    name: "Flow Integral"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return id(flow_i);'
 
   - platform: wifi_signal
     name: "WiFi Signal"
@@ -266,6 +299,9 @@ climate:
     idle_action:
       - component.update: flow_setpoint
     off_mode:
+      - globals.set:
+          id: flow_i
+          value: '0'
       - component.update: flow_setpoint
 
     # Setting a target temperature by hand (touch screen or Home Assistant)
@@ -335,6 +371,15 @@ font:
 # UI logic
 # ---------------------------------------------------------------------------
 globals:
+  # Integral part of the flow setpoint (degC) and when it was last updated.
+  # Kept across presets; cleared on reboot and when the mode is set to OFF.
+  - id: flow_i
+    type: float
+    initial_value: '0'
+  - id: flow_i_ms
+    type: uint32_t
+    initial_value: '0'
+
   - id: show_set
     type: bool
     initial_value: 'false'
