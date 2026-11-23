@@ -159,9 +159,9 @@ sensor:
     name: "NTC Voltage"
     internal: true
     pin: ${ntc_pin}
-    attenuation: 6db
+    attenuation: 12db
     samples: 64
-    update_interval: 10s
+    update_interval: 5s
 
   # 2) NTC resistance. DOWNSTREAM = the NTC is on the GND side of the divider
   - platform: resistance
@@ -188,9 +188,11 @@ sensor:
       - lambda: |-
           if (x < -10.0f || x > 40.0f) return NAN;
           return x;
-      - sliding_window_moving_average:
-          window_size: 12
-          send_every: 1
+      # Exponential moving average: time constant ~1 min at one reading
+      # per 5 s (5 s / 0.08). Lower alpha = smoother but slower.
+      - exponential_moving_average:
+          alpha: 0.08
+          send_every: 2
       # Calibrate against a reference thermometer if needed:
       # - offset: -0.5
 
